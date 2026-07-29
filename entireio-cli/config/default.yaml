@@ -1,0 +1,47 @@
+data_dir: .
+derived_dir: derived
+key_file: ../temp_openrouter_key.txt
+pilot:
+  size: 275
+  seed: 20260729
+  train_before: "2026-03-01T00:00:00Z"
+  validation_before: "2026-03-10T00:00:00Z"
+evidence:
+  max_chars: 8000
+  chunk_chars: 5000
+  chunk_overlap: 300
+  include_thinking: true
+  include_tool_results: true
+openrouter:
+  model: openai/gpt-5.6-luna
+  reasoning_effort: medium
+  base_url: https://openrouter.ai/api/v1
+  max_concurrency: 4
+  max_retries: 4
+  timeout_seconds: 120
+  exclude_reasoning: true
+embedding:
+  model: BAAI/bge-small-en-v1.5
+  revision: 5c38ec7c405ec4b44b94cc5a9bb96e735b38267a
+  dimension: 384
+  max_sequence_length: 256
+  batch_size: 64
+  query_instruction: "Represent this sentence for searching relevant passages: "
+  index_conversation_types:
+    - user_prompt
+    - assistant_response
+    - summary
+training:
+  epochs: 3
+  batch_size: 1
+  learning_rate: 0.00002
+  freeze_lower_layers: 4
+  early_stopping_patience: 1
+retrieval:
+  collection: entireio_cli_evidence
+  dense_limit: 50
+  lexical_limit: 50
+  final_limit: 10
+  relevance_floor: 0.15
+  temporal_weight: 0.15
+  temporal_half_life_days: 30

@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "entireio-retrieval"
+version = "0.1.0"
+description = "Dataset-bounded retrieval and cited answering for the entireio/cli SWE-chat slice"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "accelerate==1.14.0",
+  "datasets==5.0.1",
+  "httpx==0.28.1",
+  "numpy==2.4.1",
+  "pandas==2.3.3",
+  "pyarrow==23.0.1",
+  "pydantic==2.12.4",
+  "PyYAML==6.0.3",
+  "qdrant-client==1.16.2",
+  "rank-bm25==0.2.2",
+  "scikit-learn==1.8.0",
+  "sentence-transformers==5.2.3",
+  "torch==2.10.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest==9.0.2",
+  "pytest-cov==7.0.0",
+  "respx==0.22.0",
+]
+
+[project.scripts]
+entireio-retrieval = "entireio_retrieval.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+markers = [
+  "live: opt-in tests that call an external API",
+]
