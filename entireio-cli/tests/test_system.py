@@ -21,6 +21,12 @@ from entireio_retrieval.benchmark import (
     semantic_deduplicate,
     validate_query,
 )
+from entireio_retrieval.calibration import (
+    annotate_and_filter_hits,
+    answerability_probability,
+    fit_calibration,
+    query_features,
+)
 from entireio_retrieval.config import (
     EvidenceConfig,
     OpenRouterConfig,
@@ -636,3 +642,97 @@ def test_trace_artifacts_and_completion_guard(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     assert _missing_answer_ids([question], tmp_path) == []
+
+
+def test_validation_only_score_and_answerability_calibration() -> None:
+    questions = []
+    dense, bm25 = {}, {}
+    judgments = []
+    for index in range(10):
+        unsupported = index >= 5
+        query_id = f"q{index}"
+        questions.append(
+                query(
+                    query_id,
+                    f"What changed in component {index}?",
+                f"positive-{index}",
+                partition="validation",
+                answerability=(
+                    Answerability.UNSUPPORTED
+                    if unsupported
+                    else Answerability.SUPPORTED
+                ),
+            )
+        )
+        relevant_id = f"positive-{index}"
+        irrelevant_id = f"negative-{index}"
+        dense[query_id] = [
+            {
+                "evidence_id": irrelevant_id if unsupported else relevant_id,
+                "dense_score": 0.55 if unsupported else 0.85,
+            },
+            {
+                "evidence_id": f"background-{index}",
+                "dense_score": 0.45 if unsupported else 0.60,
+            },
+            {"evidence_id": irrelevant_id, "dense_score": 0.40},
+        ]
+        bm25[query_id] = [
+            {
+                "evidence_id": irrelevant_id if unsupported else relevant_id,
+                "lexical_score": 1.0,
+            }
+        ]
+        for row in dense[query_id]:
+            judgments.append(
+                RelevanceJudgment(
+                    query_id=query_id,
+                    evidence_id=row["evidence_id"],
+                    grade=(
+                        3
+                        if not unsupported
+                        and row["evidence_id"] == relevant_id
+                        else 0
+                    ),
+                )
+            )
+    artifact = fit_calibration(
+        {"dense": dense, "bm25": bm25},
+        questions,
+        judgments,
+    )
+    assert artifact["trained_partition"] == "validation"
+    assert artifact["relevance"]["raw_score_threshold"] > 0.5
+    features = query_features(
+        [0.85, 0.60, 0.40],
+        ["positive-0", "background-0", "negative-0"],
+        ["positive-0"],
+        artifact,
+    )
+    assert 0 <= answerability_probability(features, artifact) <= 1
+    artifact["relevance"]["enabled_for_filtering"] = True
+    hits = [
+        RetrievalHit(
+            evidence_id="dense",
+            dense_score=0.9,
+            fusion_score=1,
+            final_score=1,
+        ),
+        RetrievalHit(
+            evidence_id="rejected",
+            dense_score=0.3,
+            fusion_score=0.5,
+            final_score=0.5,
+        ),
+        RetrievalHit(
+            evidence_id="exact",
+            dense_score=0.3,
+            lexical_rank=1,
+            fusion_score=0.4,
+            final_score=0.4,
+        ),
+    ]
+    filtered = annotate_and_filter_hits(hits, artifact)
+    assert [hit.evidence_id for hit in filtered] == ["dense", "exact"]
+    assert filtered[0].payload["relevance_probability"] >= 0
+    assert filtered[1].payload["lexical_rescue"]

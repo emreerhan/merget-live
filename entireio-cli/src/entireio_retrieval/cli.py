@@ -18,6 +18,12 @@ from .benchmark import (
     load_queries,
     pool_candidates,
 )
+from .calibration import (
+    annotate_and_filter_hits,
+    answerability_probability,
+    fit_calibration,
+    query_features,
+)
 from .config import AppConfig, load_config
 from .embeddings import DenseEncoder, select_index_records
 from .evidence import EvidenceBuilder, evidence_quality, load_evidence, write_evidence
@@ -68,6 +74,7 @@ def _paths(config: AppConfig) -> dict[str, Path]:
         "qdrant": config.derived_dir / "index" / "qdrant",
         "qdrant_fine": config.derived_dir / "index" / "qdrant-fine-tuned",
         "model": config.derived_dir / "models" / "bge-small-entireio",
+        "calibration": config.derived_dir / "evaluation" / "score-calibration.json",
     }
 
 
@@ -362,6 +369,10 @@ def command_query(config: AppConfig, args) -> list[dict]:
     vector = encoder.encode_queries([args.query])[0]
     mode = TemporalMode(args.temporal_mode) if args.temporal_mode else classify_temporal_mode(args.query)
     hits = retriever.search(args.query, vector, temporal_mode=mode)
+    if not args.fine_tuned and not args.no_calibration:
+        hits, _ = _apply_runtime_calibration(
+            config, args.query, vector, retriever, hits
+        )
     result = [hit.model_dump(mode="json") for hit in hits]
     print(json.dumps(result, indent=2))
     return result
@@ -374,6 +385,21 @@ def command_answer(config: AppConfig, args) -> dict:
     vector = encoder.encode_queries([args.query])[0]
     mode = TemporalMode(args.temporal_mode) if args.temporal_mode else classify_temporal_mode(args.query)
     hits = retriever.search(args.query, vector, temporal_mode=mode)
+    answerable_probability = None
+    if not args.fine_tuned and not args.no_calibration:
+        hits, answerable_probability = _apply_runtime_calibration(
+            config, args.query, vector, retriever, hits
+        )
+        calibration = _load_calibration(config)
+        if (
+            calibration is not None
+            and calibration["answerability"].get(
+                "enabled_for_abstention", False
+            )
+            and answerable_probability
+            < calibration["answerability"]["probability_threshold"]
+        ):
+            hits = []
     result = AnswerGenerator(
         _client(config, "answers"),
         records,
@@ -381,6 +407,55 @@ def command_answer(config: AppConfig, args) -> dict:
     ).answer(args.query, hits, temporal_mode=mode)
     print(result.model_dump_json(indent=2))
     return result.model_dump(mode="json")
+
+
+def _load_calibration(config: AppConfig) -> dict | None:
+    path = _paths(config)["calibration"]
+    return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
+
+
+def _apply_runtime_calibration(
+    config: AppConfig,
+    query_text: str,
+    query_vector: np.ndarray,
+    retriever: HybridRetriever,
+    hits: list[RetrievalHit],
+) -> tuple[list[RetrievalHit], float | None]:
+    artifact = _load_calibration(config)
+    if artifact is None:
+        return hits, None
+    ids = sorted(retriever.dense_vectors)
+    matrix = np.stack([retriever.dense_vectors[evidence_id] for evidence_id in ids])
+    scores = matrix @ query_vector
+    order = np.argsort(-scores, kind="stable")[:50]
+    dense_ids = [ids[index] for index in order]
+    dense_scores = [float(scores[index]) for index in order]
+    bm25_ids = [
+        evidence_id
+        for evidence_id, _ in retriever.lexical.rank(query_text, limit=50)
+    ]
+    features = query_features(
+        dense_scores,
+        dense_ids,
+        bm25_ids,
+        artifact,
+    )
+    probability = answerability_probability(features, artifact)
+    filtered = annotate_and_filter_hits(hits, artifact)
+    return [
+        hit.model_copy(
+            update={
+                "payload": {
+                    **hit.payload,
+                    "answerability_probability": probability,
+                    "answerability_threshold": artifact["answerability"][
+                        "probability_threshold"
+                    ],
+                }
+            }
+        )
+        for hit in filtered
+    ], probability
 
 
 def _baseline_hits(
@@ -1141,6 +1216,129 @@ def command_experiment(config: AppConfig, args) -> dict:
     return report
 
 
+def command_calibrate(config: AppConfig, args) -> dict:
+    paths = _paths(config)
+    traces_path = config.derived_dir / "evaluation" / "retrieval-traces.json"
+    if not traces_path.is_file():
+        raise RuntimeError("retrieval traces are missing; run experiment first")
+    traces = json.loads(traces_path.read_text(encoding="utf-8"))
+    if "validation" not in traces:
+        raise RuntimeError("validation traces are required for calibration")
+    queries = load_queries(paths["queries"])
+    judgments = load_judgments(paths["judgments"])
+    validation_queries = [
+        query for query in queries if query.partition == "validation"
+    ]
+    evaluation_queries = [
+        query for query in queries if query.partition == "evaluation"
+    ]
+    artifact = fit_calibration(
+        traces["validation"],
+        validation_queries,
+        judgments,
+        evaluation_traces=traces.get("evaluation"),
+        evaluation_queries=(
+            evaluation_queries if "evaluation" in traces else None
+        ),
+    )
+    artifact["retrieval_impact"] = {}
+    for partition, selected_queries in (
+        ("validation", validation_queries),
+        ("evaluation", evaluation_queries),
+    ):
+        if partition not in traces:
+            continue
+        original = {
+            query_id: [row["evidence_id"] for row in rows]
+            for query_id, rows in traces[partition]["dense"].items()
+        }
+        calibrated = {
+            query_id: [
+                row["evidence_id"]
+                for row in rows
+                if row.get("dense_score") is not None
+                and row["dense_score"]
+                >= artifact["relevance"]["raw_score_threshold"]
+            ]
+            for query_id, rows in traces[partition]["dense"].items()
+        }
+        artifact["retrieval_impact"][partition] = {
+            "before": retrieval_metrics(
+                original, judgments, selected_queries
+            )["aggregate"],
+            "after": retrieval_metrics(
+                calibrated, judgments, selected_queries
+            )["aggregate"],
+        }
+    validation_impact = artifact["retrieval_impact"]["validation"]
+    artifact["relevance"]["enabled_for_filtering"] = bool(
+        validation_impact["after"]["ndcg@10"]
+        >= validation_impact["before"]["ndcg@10"]
+        and validation_impact["after"]["recall@20"]
+        >= validation_impact["before"]["recall@20"] * 0.95
+    )
+    artifact["usage"] = {
+        "fit_inputs": ["validation"],
+        "evaluation_is_holdout_reporting_only": "evaluation" in traces,
+        "sealed_frozen_configuration_unchanged": True,
+    }
+    artifact["limitations"] = [
+        "Only five validation questions are labelled unsupported_by_dataset.",
+        "Absolute cosine-score calibration is model- and corpus-specific.",
+        "Evaluation metrics are diagnostic and were not used to select thresholds.",
+        "Lexical top-five matches bypass the dense threshold for exact-term recall.",
+    ]
+    write_json_atomic(paths["calibration"], artifact)
+    _record_manifest(
+        config,
+        "calibrate",
+        input_paths=[
+            paths["queries"],
+            paths["judgments"],
+            traces_path,
+            config.derived_dir / "evaluation" / "frozen-config.json",
+            config.derived_dir / "evaluation" / ".frozen-evaluation-complete",
+        ],
+        artifact_paths=[paths["calibration"]],
+        model_settings={
+            "model_variant": artifact["model_variant"],
+            "version": artifact["version"],
+        },
+        counts={
+            "validation_queries": len(validation_queries),
+            "evaluation_queries": len(evaluation_queries)
+            if "evaluation" in traces
+            else 0,
+        },
+    )
+    print(
+        json.dumps(
+            {
+                "version": artifact["version"],
+                "raw_score_threshold": artifact["relevance"][
+                    "raw_score_threshold"
+                ],
+                "relevance_validation_oof": artifact["relevance"][
+                    "validation_oof_metrics"
+                ],
+                "relevance_filtering_enabled": artifact["relevance"][
+                    "enabled_for_filtering"
+                ],
+                "answerability_validation": artifact["answerability"][
+                    "validation_oof_metrics"
+                ],
+                "answerability_abstention_enabled": artifact["answerability"][
+                    "enabled_for_abstention"
+                ],
+                "retrieval_impact": artifact["retrieval_impact"],
+                "holdout_evaluation": artifact.get("holdout_evaluation"),
+            },
+            indent=2,
+        )
+    )
+    return artifact
+
+
 def command_audit(config: AppConfig, args) -> dict:
     paths = _paths(config)
     records = load_evidence(paths["evidence"])
@@ -1228,11 +1426,13 @@ def parser() -> argparse.ArgumentParser:
     query.add_argument("query")
     query.add_argument("--temporal-mode", choices=[item.value for item in TemporalMode])
     query.add_argument("--fine-tuned", action="store_true")
+    query.add_argument("--no-calibration", action="store_true")
 
     answer = sub.add_parser("answer")
     answer.add_argument("query")
     answer.add_argument("--temporal-mode", choices=[item.value for item in TemporalMode])
     answer.add_argument("--fine-tuned", action="store_true")
+    answer.add_argument("--no-calibration", action="store_true")
 
     answer_benchmark = sub.add_parser("answer-benchmark")
     answer_benchmark.add_argument(
@@ -1249,6 +1449,7 @@ def parser() -> argparse.ArgumentParser:
     experiment = sub.add_parser("experiment")
     experiment.add_argument("--run-frozen-evaluation", action="store_true")
 
+    sub.add_parser("calibrate")
     sub.add_parser("audit")
     return result
 
@@ -1268,6 +1469,7 @@ def main(argv: list[str] | None = None) -> int:
         "train": command_train,
         "evaluate": command_evaluate,
         "experiment": command_experiment,
+        "calibrate": command_calibrate,
         "audit": command_audit,
     }
     handlers[args.command](config, args)
