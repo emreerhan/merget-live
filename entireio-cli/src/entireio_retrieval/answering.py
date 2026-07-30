@@ -85,7 +85,7 @@ class AnswerGenerator:
         *,
         query_id: str | None = None,
         temporal_mode: TemporalMode = TemporalMode.NEUTRAL,
-        max_regenerations: int = 1,
+        max_regenerations: int = 3,
     ) -> AnswerRecord:
         context = assemble_context(hits, self.by_id)
         if not context:
@@ -207,4 +207,3 @@ class AnswerGenerator:
     def _persist(self, result: AnswerRecord) -> None:
         identifier = result.query_id or stable_id("query", result.query)
         write_json_atomic(self.artifact_dir / f"{identifier}.json", result)
-

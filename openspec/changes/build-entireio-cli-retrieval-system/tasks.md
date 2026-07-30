@@ -69,8 +69,8 @@
 
 - [x] 9.1 Implement retrieval metrics for nDCG@10, MRR@10, Precision@5, Recall@20/50, evidence coverage, claim coverage, answerability, and temporal correctness
 - [x] 9.2 Implement answer metrics for expected-claim coverage, citation precision and recall, groundedness, answerability classification, temporal correctness, and unsupported-query false-answer rate
-- [ ] 9.3 Run and compare BM25-only, pretrained dense, fine-tuned dense, hybrid, and hybrid-plus-temporal pilot experiments on unchanged partitions
-- [ ] 9.4 Tune thresholds and temporal weights only on validation data, freeze the selected configuration, and run the final pilot evaluation once
-- [ ] 9.5 Produce a reproducible pilot report covering dataset coverage, accepted/rejected query distributions, resource usage, API cost, retrieval ablations, answer quality, limitations, and artifact hashes
+- [x] 9.3 Run and compare BM25-only, pretrained dense, fine-tuned dense, hybrid, and hybrid-plus-temporal pilot experiments on unchanged partitions
+- [x] 9.4 Tune thresholds and temporal weights only on validation data, freeze the selected configuration, and run the final pilot evaluation once
+- [x] 9.5 Produce a reproducible pilot report covering dataset coverage, accepted/rejected query distributions, resource usage, API cost, retrieval ablations, answer quality, limitations, and artifact hashes
 - [x] 9.6 Add end-to-end documentation for preparing evidence, generating the benchmark, training, indexing, querying, answering, evaluating, resuming runs, and removing derived artifacts
 - [x] 9.7 Run the complete automated test suite and a dataset-boundary audit proving that no factual evidence outside `entireio-cli` influenced the artifacts
